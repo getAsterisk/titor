@@ -52,7 +52,7 @@
 //!     ignore_patterns: vec![],
 //!     compression_strategy: "fast".to_string(),
 //!     follow_symlinks: false,
-//!     version: "0.1.0".to_string(),
+//!     version: "0.1.1".to_string(),
 //! };
 //! let compression = CompressionEngine::new(
 //!     titor::compression::CompressionStrategy::Fast
@@ -154,7 +154,7 @@ use tracing::{debug, info, trace, warn};
 ///     ignore_patterns: vec![],
 ///     compression_strategy: "fast".to_string(),
 ///     follow_symlinks: false,
-///     version: "0.1.0".to_string(),
+///     version: "0.1.1".to_string(),
 /// };
 /// let compression = CompressionEngine::new(
 ///     titor::compression::CompressionStrategy::Fast
@@ -240,7 +240,7 @@ impl Storage {
     /// #     ignore_patterns: vec![],
     /// #     compression_strategy: "fast".to_string(),
     /// #     follow_symlinks: false,
-    /// #     version: "0.1.0".to_string(),
+    /// #     version: "0.1.1".to_string(),
     /// # };
     /// let compression = CompressionEngine::new(
     ///     titor::compression::CompressionStrategy::Fast
@@ -438,7 +438,7 @@ impl Storage {
     /// use std::path::PathBuf;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.0".to_string() };
+    /// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.1".to_string() };
     /// # let compression = CompressionEngine::new(titor::compression::CompressionStrategy::Fast);
     /// # let storage = Storage::init(PathBuf::from("./test_storage"), config, compression)?;
     /// let content = b"Hello, world!";
@@ -527,7 +527,7 @@ impl Storage {
     /// use std::path::PathBuf;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.0".to_string() };
+    /// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.1".to_string() };
     /// # let compression = CompressionEngine::new(titor::compression::CompressionStrategy::Fast);
     /// # let storage = Storage::init(PathBuf::from("./test_storage"), config, compression)?;
     /// # let content = b"Hello, world!";
@@ -824,7 +824,7 @@ impl Storage {
     /// use std::path::PathBuf;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.0".to_string() };
+    /// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.1".to_string() };
     /// # let compression = CompressionEngine::new(titor::compression::CompressionStrategy::Fast);
     /// # let storage = Storage::init(PathBuf::from("./test_storage"), config, compression)?;
     /// let stats = storage.stats()?;
@@ -975,7 +975,7 @@ impl Storage {
 /// use std::path::PathBuf;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.0".to_string() };
+/// # let config = TitorConfig { root_path: PathBuf::from("./project"), storage_path: PathBuf::from("./storage"), max_file_size: 0, parallel_workers: 4, ignore_patterns: vec![], compression_strategy: "fast".to_string(), follow_symlinks: false, version: "0.1.1".to_string() };
 /// # let compression = CompressionEngine::new(titor::compression::CompressionStrategy::Fast);
 /// # let storage = Storage::init(PathBuf::from("./test_storage"), config, compression)?;
 /// let stats = storage.stats()?;
@@ -1056,7 +1056,7 @@ mod tests {
             ignore_patterns: vec![],
             compression_strategy: "fast".to_string(),
             follow_symlinks: false,
-            version: "0.1.0".to_string(),
+            version: "0.1.1".to_string(),
         };
         
         let compression = CompressionEngine::new(CompressionStrategy::Fast);
@@ -1086,7 +1086,7 @@ mod tests {
             ignore_patterns: vec![],
             compression_strategy: "fast".to_string(),
             follow_symlinks: false,
-            version: "0.1.0".to_string(),
+            version: "0.1.1".to_string(),
         };
         
         let compression = CompressionEngine::new(CompressionStrategy::Fast);
