@@ -1,6 +1,7 @@
 //! Collection type aliases that switch between gxhash and std collections
-//! based on feature flags. This allows building on docs.rs without CPU-specific
-//! requirements while maintaining performance in normal builds.
+//! based on feature flags. This allows building on systems without specific
+//! CPU intrinsics (AES-NI, SSE2) while providing better performance on systems
+//! that support these features.
 
 #[cfg(feature = "gxhash")]
 pub use gxhash::{
