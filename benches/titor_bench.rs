@@ -5,12 +5,13 @@
 
 #![cfg_attr(feature = "quick-bench", allow(dead_code))]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use titor::compression::CompressionStrategy;
 use titor::TitorBuilder;
 use titor::types::{FileManifest, FileEntry};
 use chrono::Utc;
 use std::fs;
+use std::hint::black_box;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -230,7 +231,7 @@ fn bench_incremental_changes(c: &mut Criterion) {
                         let files_to_change = (file_count * change_percentage) / 100;
                         for i in 0..files_to_change {
                             let path = temp_dir.path().join(format!("file_{}.txt", i));
-                            let new_content = format!("Modified content {}", rng.gen::<u32>());
+                            let new_content = format!("Modified content {}", rng.random::<u32>());
                             fs::write(path, new_content).unwrap();
                         }
                         
@@ -510,14 +511,14 @@ fn manifest_serialization(c: &mut Criterion) {
 }
 
 fn create_test_manifest(file_count: usize) -> FileManifest {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let mut files = Vec::with_capacity(file_count);
     
     for i in 0..file_count {
         let path = PathBuf::from(format!("dir{}/file{}.txt", i / 100, i));
-        let content_hash = format!("{:064x}", rng.gen::<u128>());
-        let metadata_hash = format!("{:064x}", rng.gen::<u128>());
-        let combined_hash = format!("{:064x}", rng.gen::<u128>());
+        let content_hash = format!("{:064x}", rng.random::<u128>());
+        let metadata_hash = format!("{:064x}", rng.random::<u128>());
+        let combined_hash = format!("{:064x}", rng.random::<u128>());
         
         files.push(FileEntry {
             path,
@@ -525,7 +526,7 @@ fn create_test_manifest(file_count: usize) -> FileManifest {
             size: rng.random_range(100..1000000),
             permissions: 0o644,
             modified: Utc::now(),
-            is_compressed: rng.gen_bool(0.7),
+            is_compressed: rng.random_bool(0.7),
             metadata_hash,
             combined_hash,
             is_symlink: false,
@@ -539,7 +540,7 @@ fn create_test_manifest(file_count: usize) -> FileManifest {
         files,
         total_size: rng.random_range(1000000..100000000),
         file_count,
-        merkle_root: format!("{:064x}", rng.gen::<u128>()),
+        merkle_root: format!("{:064x}", rng.random::<u128>()),
         created_at: Utc::now(),
     }
 }
