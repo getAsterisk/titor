@@ -47,7 +47,7 @@
 use crate::checkpoint::Checkpoint;
 use crate::error::{Result, TitorError};
 use serde::{Deserialize, Serialize};
-use gxhash::{HashMap, HashMapExt, HashSet, HashSetExt};
+use crate::collections::{HashMap, HashMapExt, HashSet, HashSetExt};
 use std::collections::VecDeque;
 use tracing::{debug, trace};
 

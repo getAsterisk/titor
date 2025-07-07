@@ -29,7 +29,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use gxhash::HashMap;
+use crate::collections::HashMap;
 use std::sync::Arc;
 
 /// Represents a file entry in a checkpoint manifest

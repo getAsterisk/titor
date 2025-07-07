@@ -110,7 +110,7 @@ use crate::types::{FileManifest, StorageMetadata, StorageObject, TitorConfig};
 use chrono::Utc;
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
-use gxhash::GxBuildHasher;
+use crate::collections::GxBuildHasher;
 use sha2::{Digest, Sha256};
 use std::fs;
 

@@ -11,8 +11,9 @@ keywords = ["checkpoint", "snapshot", "backup", "time-travel", "versioning"]
 categories = ["filesystem", "data-structures"]
 
 [features]
-default = []
+default = ["gxhash"]
 quick-bench = []
+gxhash = ["dep:gxhash"]
 
 [dependencies]
 # Serialization
@@ -23,7 +24,7 @@ bincode = { version = "2.0", features = ["serde"] }
 # Hashing and Compression
 sha2 = "0.10"
 lz4_flex = "0.11"
-gxhash = "3.5"  # Fast non-cryptographic hash algorithm
+gxhash = { version = "3.5", optional = true }  # Fast non-cryptographic hash algorithm
 
 # File system operations
 walkdir = "2.5"
@@ -100,3 +101,7 @@ required-features = ["rmcp", "schemars"]
 [[bench]]
 name = "titor_bench"
 harness = false
+
+[package.metadata.docs.rs]
+# Build docs without gxhash to avoid CPU feature requirements
+no-default-features = true

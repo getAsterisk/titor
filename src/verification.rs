@@ -65,7 +65,7 @@ use crate::types::FileEntry;
 use crate::utils;
 
 use serde::{Deserialize, Serialize};
-use gxhash::{HashMap, HashMapExt};
+use crate::collections::{HashMap, HashMapExt};
 use std::collections::HashSet;
 use std::time::Instant;
 use tracing::{debug, error, info, warn};

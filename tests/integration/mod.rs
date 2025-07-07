@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
-use gxhash::{HashMap, HashMapExt};
+use std::collections::HashMap;
 use tracing::info;
 
 /// Test harness for complex checkpoint scenarios

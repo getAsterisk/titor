@@ -148,7 +148,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
-use gxhash::{HashMap, HashSet, HashSetExt};
+use crate::collections::{HashMap, HashSet, HashSetExt};
 use tracing::{debug, trace, warn};
 
 /// File tracker for detecting changes in a directory

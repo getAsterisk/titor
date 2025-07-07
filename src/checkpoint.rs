@@ -49,7 +49,7 @@ use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use gxhash::HashMap;
+use crate::collections::HashMap;
 
 /// Represents a checkpoint in the timeline
 ///
@@ -314,7 +314,7 @@ impl Checkpoint {
     ///
     /// ```rust
     /// # use titor::checkpoint::{Checkpoint, CheckpointMetadataBuilder};
-    /// # use gxhash::{HashMap, HashMapExt};
+    /// # use crate::collections::{HashMap, HashMapExt};
     /// # let checkpoint = Checkpoint::new(Some("parent".to_string()), None, CheckpointMetadataBuilder::new().build(), "".to_string());
     /// # let checkpoints = HashMap::new();
     /// if checkpoint.is_descendant_of("root-id", &checkpoints) {
@@ -355,7 +355,7 @@ impl Checkpoint {
     ///
     /// ```rust
     /// # use titor::checkpoint::{Checkpoint, CheckpointMetadataBuilder};
-    /// # use gxhash::{HashMap, HashMapExt};
+    /// # use crate::collections::{HashMap, HashMapExt};
     /// # let checkpoint = Checkpoint::new(Some("parent".to_string()), None, CheckpointMetadataBuilder::new().build(), "".to_string());
     /// # let checkpoints = HashMap::new();
     /// let chain = checkpoint.get_parent_chain(&checkpoints);
@@ -596,7 +596,7 @@ impl CheckpointMetadataBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gxhash::HashMapExt;
+    use crate::collections::HashMapExt;
     
     #[test]
     fn test_checkpoint_creation() {

@@ -122,7 +122,7 @@ use crate::error::{Result, TitorError};
 use crate::types::FileEntry;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use gxhash::{HashMap, HashMapExt};
+use crate::collections::{HashMap, HashMapExt};
 use tracing::trace;
 
 /// A node in the Merkle tree structure

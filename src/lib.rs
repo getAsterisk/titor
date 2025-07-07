@@ -202,6 +202,7 @@ pub mod types;
 pub mod verification;
 
 // Internal modules (not part of public API)
+mod collections;
 mod file_tracking;
 mod merkle;
 pub mod storage;
