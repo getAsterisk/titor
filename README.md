@@ -95,7 +95,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-titor = "0.1.0"
+titor = "0.1.1"
 ```
 
 ### Dependencies
