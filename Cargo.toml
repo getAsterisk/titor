@@ -1,6 +1,6 @@
 [package]
 name = "titor"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Mufeed VH <mufeed@asterisk.so>"]
 description = "A high-performance checkpointing library for time-travel through directory states"

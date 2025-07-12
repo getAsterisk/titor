@@ -691,7 +691,7 @@ mod tests {
             ignore_patterns: vec![],
             compression_strategy: "fast".to_string(),
             follow_symlinks: false,
-            version: "0.1.1".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         };
         
         let compression = CompressionEngine::new(CompressionStrategy::Fast);
