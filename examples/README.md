@@ -206,17 +206,45 @@ titor fork HEAD -m "Alternative approach"
 Show differences between two checkpoints.
 
 ```bash
-titor diff <FROM> <TO>
+titor diff <FROM> <TO> [OPTIONS]
+
+Options:
+  -l, --lines              Show line-level differences (like git diff)
+  --context <NUM>          Number of context lines (default: 3)
+  --stat                   Show only statistics
+  --ignore-whitespace      Ignore whitespace changes
 ```
 
 **Examples:**
 
 ```bash
-# Compare two checkpoints
+# Basic file-level comparison
 titor diff abc12345 def67890
 
-# Compare current with previous
-titor diff HEAD HEAD~1
+# Line-level diff with git-like output
+titor diff abc12345 def67890 --lines
+
+# Custom context lines
+titor diff abc12345 def67890 --lines --context 5
+
+# Statistics only
+titor diff abc12345 def67890 --stat
+
+# Ignore whitespace changes
+titor diff abc12345 def67890 --lines --ignore-whitespace
+```
+
+**Output Format:**
+
+With `--lines`, the output shows unified diff format:
+```diff
+--- a/file.txt
++++ b/file.txt
+@@ -1,5 +1,6 @@
+ context line
+-removed line
++added line
+ another context line
 ```
 
 ### `verify` - Verify Integrity
@@ -438,6 +466,7 @@ The CLI demonstrates all major Titor features:
 4. **Compression**: LZ4 compression for efficiency
 5. **Deduplication**: Identical files stored once
 6. **Atomic Operations**: All-or-nothing checkpoint/restore
+7. **Line-Level Diffs**: Git-like unified diff output for text files
 
 ## Contributing
 

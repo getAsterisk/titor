@@ -60,7 +60,7 @@ use crate::verification::{CheckpointVerifier, TimelineVerificationReport, Verifi
 use parking_lot::{Mutex, RwLock};
 use rayon::prelude::*;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, instrument, trace, warn};
@@ -198,6 +198,15 @@ impl Titor {
         // Create file tracker
         let file_tracker = FileTracker::new(root_path.clone());
         
+        // Ensure .titor is in .gitignore
+        let gitignore_path = root_path.join(".gitignore");
+        if let Err(e) = utils::ensure_gitignore_has_entry(&gitignore_path, ".titor") {
+            warn!("Failed to update .gitignore: {}", e);
+            // Continue anyway - this is not a critical error
+        } else {
+            debug!("Ensured .titor is in .gitignore");
+        }
+        
         Ok(Self {
             root_path,
             storage: Arc::new(storage),
@@ -270,6 +279,15 @@ impl Titor {
         
         // Load timeline
         let timeline = Self::load_timeline(&storage)?;
+        
+        // Ensure .titor is in .gitignore
+        let gitignore_path = root_path.join(".gitignore");
+        if let Err(e) = utils::ensure_gitignore_has_entry(&gitignore_path, ".titor") {
+            warn!("Failed to update .gitignore: {}", e);
+            // Continue anyway - this is not a critical error
+        } else {
+            debug!("Ensured .titor is in .gitignore");
+        }
         
         Ok(Self {
             root_path,
@@ -865,29 +883,28 @@ impl Titor {
         self.checkpoint(fork_description)
     }
     
-    /// Compare two checkpoints
+    /// Compare two checkpoints (file-level differences)
     ///
-    /// Computes the differences between two checkpoints, showing which files were
-    /// added, modified, or deleted. This is useful for understanding what changed
-    /// between any two points in time.
+    /// Computes the differences between two checkpoints, showing which files
+    /// were added, modified, or deleted. This comparison is based on content
+    /// hashes rather than timestamps.
     ///
     /// # Arguments
     ///
-    /// * `from_id` - The ID of the source checkpoint
-    /// * `to_id` - The ID of the target checkpoint
+    /// * `from_id` - Source checkpoint ID (older)
+    /// * `to_id` - Target checkpoint ID (newer)
     ///
     /// # Returns
     ///
-    /// Returns a `CheckpointDiff` containing:
+    /// Returns a [`CheckpointDiff`] containing:
     /// - Lists of added, modified, and deleted files
-    /// - Statistics about the changes
-    /// - File paths that were affected
+    /// - Change statistics (file counts and sizes)
     ///
     /// # Errors
     ///
     /// This function will return an error if:
-    /// - Either checkpoint ID is invalid or not found
-    /// - Manifest data cannot be loaded
+    /// - Either checkpoint ID is not found
+    /// - Checkpoint data cannot be loaded
     ///
     /// # Examples
     ///
@@ -896,7 +913,6 @@ impl Titor {
     /// # use std::path::PathBuf;
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # let titor = Titor::init(PathBuf::from("."), PathBuf::from(".titor"))?;
-    /// // Compare two checkpoints
     /// let diff = titor.diff("checkpoint1", "checkpoint2")?;
     /// 
     /// println!("Files added: {}", diff.added_files.len());
@@ -971,6 +987,244 @@ impl Titor {
             modified_files,
             deleted_files,
             stats,
+        })
+    }
+    
+    /// Compute line-level diff for a specific file between checkpoints
+    ///
+    /// This method provides detailed line-by-line differences for a text file
+    /// between two checkpoints, similar to git diff output.
+    ///
+    /// # Arguments
+    ///
+    /// * `from_id` - Source checkpoint ID
+    /// * `to_id` - Target checkpoint ID  
+    /// * `file_path` - Path to the file to diff
+    /// * `options` - Options controlling diff generation
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`FileDiff`] containing:
+    /// - Diff hunks with line-level changes
+    /// - Line addition/deletion counts
+    /// - Binary file detection
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if:
+    /// - Either checkpoint doesn't exist
+    /// - The file doesn't exist in one or both checkpoints
+    /// - The file content cannot be loaded
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use titor::{Titor, types::DiffOptions};
+    /// # use std::path::{Path, PathBuf};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let titor = Titor::init(PathBuf::from("."), PathBuf::from(".titor"))?;
+    /// let options = DiffOptions::default();
+    /// let file_diff = titor.diff_file("checkpoint1", "checkpoint2", 
+    ///                                  Path::new("src/main.rs"), options)?;
+    /// 
+    /// println!("Lines added: {}", file_diff.lines_added);
+    /// println!("Lines deleted: {}", file_diff.lines_deleted);
+    /// 
+    /// for hunk in &file_diff.hunks {
+    ///     println!("@@ -{},{} +{},{} @@", 
+    ///              hunk.from_line, hunk.from_count,
+    ///              hunk.to_line, hunk.to_count);
+    ///     // Print the actual line changes...
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn diff_file(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        file_path: &Path,
+        options: crate::types::DiffOptions,
+    ) -> Result<crate::types::FileDiff> {
+        use crate::diff;
+        
+        debug!("Computing file diff for {:?} between {} and {}", 
+               file_path,
+               &from_id[..8.min(from_id.len())],
+               &to_id[..8.min(to_id.len())]);
+        
+        // Load manifests
+        let from_manifest = self.storage.load_manifest(from_id)?;
+        let to_manifest = self.storage.load_manifest(to_id)?;
+        
+        // Find the file in both manifests
+        let from_entry = from_manifest.files.iter()
+            .find(|e| e.path == file_path)
+            .ok_or_else(|| TitorError::internal(
+                format!("File {:?} not found in checkpoint {}", file_path, from_id)
+            ))?;
+            
+        let to_entry = to_manifest.files.iter()
+            .find(|e| e.path == file_path)
+            .ok_or_else(|| TitorError::internal(
+                format!("File {:?} not found in checkpoint {}", file_path, to_id)
+            ))?;
+        
+        // Check if the file actually changed
+        if from_entry.content_hash == to_entry.content_hash {
+            // No changes - return empty diff
+            return Ok(crate::types::FileDiff {
+                path: file_path.to_path_buf(),
+                from_hash: from_entry.content_hash.clone(),
+                to_hash: to_entry.content_hash.clone(),
+                is_binary: false,
+                hunks: vec![],
+                lines_added: 0,
+                lines_deleted: 0,
+            });
+        }
+        
+        // Check file size limits
+        if from_entry.size > options.max_file_size || to_entry.size > options.max_file_size {
+            return Err(TitorError::internal(
+                format!("File {:?} exceeds maximum size for diff ({} bytes)", 
+                        file_path, options.max_file_size)
+            ));
+        }
+        
+        // Load file contents
+        let from_content = self.storage.load_object(&from_entry.content_hash)?;
+        let to_content = self.storage.load_object(&to_entry.content_hash)?;
+        
+        // Create the file diff
+        diff::create_file_diff(
+            file_path,
+            &from_entry.content_hash,
+            &to_entry.content_hash,
+            &from_content,
+            &to_content,
+            &options,
+        )
+    }
+    
+    /// Compare two checkpoints with detailed line-level differences
+    ///
+    /// This method extends the basic diff functionality by computing line-level
+    /// differences for all modified text files, providing git-like diff output.
+    ///
+    /// # Arguments
+    ///
+    /// * `from_id` - Source checkpoint ID
+    /// * `to_id` - Target checkpoint ID
+    /// * `options` - Options controlling diff generation
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`DetailedCheckpointDiff`] containing:
+    /// - Basic file-level diff information
+    /// - Line-level diffs for each modified text file
+    /// - Total line addition/deletion counts
+    ///
+    /// # Notes
+    ///
+    /// - Binary files are detected and marked but not diffed
+    /// - Large files may be skipped based on `options.max_file_size`
+    /// - This operation may be memory intensive for large changesets
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use titor::{Titor, types::DiffOptions};
+    /// # use std::path::PathBuf;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let titor = Titor::init(PathBuf::from("."), PathBuf::from(".titor"))?;
+    /// let options = DiffOptions {
+    ///     context_lines: 3,
+    ///     ignore_whitespace: false,
+    ///     show_line_numbers: true,
+    ///     max_file_size: 10 * 1024 * 1024, // 10MB
+    /// };
+    /// 
+    /// let detailed_diff = titor.diff_detailed("checkpoint1", "checkpoint2", options)?;
+    /// 
+    /// println!("Total lines added: {}", detailed_diff.total_lines_added);
+    /// println!("Total lines deleted: {}", detailed_diff.total_lines_deleted);
+    /// 
+    /// for file_diff in &detailed_diff.file_diffs {
+    ///     if file_diff.is_binary {
+    ///         println!("Binary file: {:?}", file_diff.path);
+    ///     } else {
+    ///         println!("Modified: {:?} (+{} -{})", 
+    ///                  file_diff.path, 
+    ///                  file_diff.lines_added,
+    ///                  file_diff.lines_deleted);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn diff_detailed(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        options: crate::types::DiffOptions,
+    ) -> Result<crate::types::DetailedCheckpointDiff> {
+        use crate::diff;
+        
+        debug!("Computing detailed diff between {} and {}", 
+               &from_id[..8.min(from_id.len())],
+               &to_id[..8.min(to_id.len())]);
+        
+        // First get the basic diff
+        let basic_diff = self.diff(from_id, to_id)?;
+        
+        // Now compute line-level diffs for modified files
+        let mut file_diffs = Vec::new();
+        let mut total_lines_added = 0;
+        let mut total_lines_deleted = 0;
+        
+        for (from_entry, to_entry) in &basic_diff.modified_files {
+            // Skip files that are too large
+            if from_entry.size > options.max_file_size || to_entry.size > options.max_file_size {
+                debug!("Skipping large file {:?} for line diff", from_entry.path);
+                continue;
+            }
+            
+            // Load file contents
+            match (
+                self.storage.load_object(&from_entry.content_hash),
+                self.storage.load_object(&to_entry.content_hash)
+            ) {
+                (Ok(from_content), Ok(to_content)) => {
+                    match diff::create_file_diff(
+                        &from_entry.path,
+                        &from_entry.content_hash,
+                        &to_entry.content_hash,
+                        &from_content,
+                        &to_content,
+                        &options,
+                    ) {
+                        Ok(file_diff) => {
+                            total_lines_added += file_diff.lines_added;
+                            total_lines_deleted += file_diff.lines_deleted;
+                            file_diffs.push(file_diff);
+                        }
+                        Err(e) => {
+                            warn!("Failed to compute diff for {:?}: {}", from_entry.path, e);
+                        }
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    warn!("Failed to load content for {:?}: {}", from_entry.path, e);
+                }
+            }
+        }
+        
+        Ok(crate::types::DetailedCheckpointDiff {
+            basic_diff,
+            file_diffs,
+            total_lines_added,
+            total_lines_deleted,
         })
     }
     
@@ -1789,5 +2043,414 @@ mod tests {
         assert!(temp_dir.path().join("nested/empty").exists(), "Nested empty directory was not restored");
         assert!(temp_dir.path().join("dir_with_file").exists(), "Directory with file was not restored");
         assert!(temp_dir.path().join("dir_with_file/file.txt").exists(), "File in directory was not restored");
+    }
+    
+    #[test]
+    fn test_line_diff_simple() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create a file with initial content
+        let file_path = temp_dir.path().join("test.txt");
+        fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Initial".to_string())).unwrap();
+        
+        // Modify the file
+        fs::write(&file_path, "line1\nline2 modified\nline3\nline4\n").unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Modified".to_string())).unwrap();
+        
+        // Get line diff
+        let options = DiffOptions::default();
+        let file_diff = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("test.txt"),
+            options
+        ).unwrap();
+        
+        // Verify diff results
+        assert!(!file_diff.is_binary);
+        assert_eq!(file_diff.lines_added, 2); // "line2 modified" and "line4"
+        assert_eq!(file_diff.lines_deleted, 1); // "line2"
+        assert!(file_diff.hunks.len() > 0);
+    }
+    
+    #[test]
+    fn test_line_diff_binary_file() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create a binary file
+        let file_path = temp_dir.path().join("binary.dat");
+        let binary_content: Vec<u8> = vec![0, 1, 2, 3, 255, 254, 253, 0];
+        fs::write(&file_path, &binary_content).unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Binary v1".to_string())).unwrap();
+        
+        // Modify the binary file
+        let modified_binary: Vec<u8> = vec![0, 1, 2, 3, 4, 5, 6, 7, 0];
+        fs::write(&file_path, &modified_binary).unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Binary v2".to_string())).unwrap();
+        
+        // Get diff
+        let options = DiffOptions::default();
+        let file_diff = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("binary.dat"),
+            options
+        ).unwrap();
+        
+        // Verify binary detection
+        assert!(file_diff.is_binary);
+        assert_eq!(file_diff.hunks.len(), 0); // No hunks for binary files
+        assert_eq!(file_diff.lines_added, 0);
+        assert_eq!(file_diff.lines_deleted, 0);
+    }
+    
+    #[test]
+    fn test_line_diff_new_file() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create initial checkpoint without the file
+        fs::write(temp_dir.path().join("other.txt"), "other content").unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Before".to_string())).unwrap();
+        
+        // Add new file
+        fs::write(temp_dir.path().join("new.txt"), "new line 1\nnew line 2\n").unwrap();
+        let checkpoint2 = titor.checkpoint(Some("After".to_string())).unwrap();
+        
+        // Try to diff a file that doesn't exist in first checkpoint
+        let options = DiffOptions::default();
+        let result = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("new.txt"),
+            options
+        );
+        
+        // Should fail because file doesn't exist in first checkpoint
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_line_diff_context_lines() {
+        use crate::types::{DiffOptions, LineChange};
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create a file with many lines
+        let content = (1..=10).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+        fs::write(temp_dir.path().join("context.txt"), &content).unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Original".to_string())).unwrap();
+        
+        // Modify one line in the middle
+        let modified = content.replace("line5", "line5 modified");
+        fs::write(temp_dir.path().join("context.txt"), &modified).unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Modified".to_string())).unwrap();
+        
+        // Get diff with custom context lines
+        let mut options = DiffOptions::default();
+        options.context_lines = 2;
+        
+        let file_diff = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("context.txt"),
+            options
+        ).unwrap();
+        
+        // Verify we have context lines
+        assert_eq!(file_diff.hunks.len(), 1);
+        let hunk = &file_diff.hunks[0];
+        
+        // Count context lines
+        let context_count = hunk.changes.iter()
+            .filter(|c| matches!(c, LineChange::Context(_, _)))
+            .count();
+        
+        // Should have at least 4 context lines (2 before, 2 after)
+        assert!(context_count >= 4);
+    }
+    
+    #[test]
+    fn test_detailed_diff() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create multiple files
+        fs::write(temp_dir.path().join("file1.txt"), "content1").unwrap();
+        fs::write(temp_dir.path().join("file2.txt"), "content2").unwrap();
+        fs::write(temp_dir.path().join("file3.txt"), "content3").unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Initial".to_string())).unwrap();
+        
+        // Modify files
+        fs::write(temp_dir.path().join("file1.txt"), "content1\nmodified").unwrap();
+        fs::write(temp_dir.path().join("file2.txt"), "completely different").unwrap();
+        fs::remove_file(temp_dir.path().join("file3.txt")).unwrap();
+        fs::write(temp_dir.path().join("file4.txt"), "new file").unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Changes".to_string())).unwrap();
+        
+        // Get detailed diff
+        let options = DiffOptions::default();
+        let detailed = titor.diff_detailed(&checkpoint1.id, &checkpoint2.id, options).unwrap();
+        
+        // Verify basic diff info
+        assert_eq!(detailed.basic_diff.added_files.len(), 1); // file4.txt
+        assert_eq!(detailed.basic_diff.modified_files.len(), 2); // file1.txt, file2.txt
+        assert_eq!(detailed.basic_diff.deleted_files.len(), 1); // file3.txt
+        
+        // Verify line-level diffs were computed for modified files
+        assert_eq!(detailed.file_diffs.len(), 2); // Should have diffs for 2 modified files
+        assert!(detailed.total_lines_added > 0);
+        assert!(detailed.total_lines_deleted > 0);
+    }
+    
+    #[test]
+    fn test_line_diff_whitespace_ignore() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create file with whitespace
+        fs::write(temp_dir.path().join("whitespace.txt"), "line1\nline2  \nline3").unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Original".to_string())).unwrap();
+        
+        // Modify whitespace only
+        fs::write(temp_dir.path().join("whitespace.txt"), "line1\nline2\nline3  ").unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Whitespace changed".to_string())).unwrap();
+        
+        // Diff without ignoring whitespace
+        let options_no_ignore = DiffOptions {
+            ignore_whitespace: false,
+            ..Default::default()
+        };
+        let diff_with_ws = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("whitespace.txt"),
+            options_no_ignore
+        ).unwrap();
+        
+        // Diff ignoring whitespace
+        let options_ignore = DiffOptions {
+            ignore_whitespace: true,
+            ..Default::default()
+        };
+        let diff_without_ws = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("whitespace.txt"),
+            options_ignore
+        ).unwrap();
+        
+        // When not ignoring whitespace, we should see changes
+        assert!(diff_with_ws.lines_added > 0 || diff_with_ws.lines_deleted > 0);
+        
+        // When ignoring whitespace, changes should be minimal or none
+        // (This depends on the exact implementation of whitespace handling)
+        assert!(diff_without_ws.lines_added <= diff_with_ws.lines_added);
+        assert!(diff_without_ws.lines_deleted <= diff_with_ws.lines_deleted);
+    }
+    
+    #[test] 
+    fn test_line_diff_large_file() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create a large file
+        let large_content = "Large line\n".repeat(10000);
+        fs::write(temp_dir.path().join("large.txt"), &large_content).unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Large file".to_string())).unwrap();
+        
+        // Modify it slightly
+        let modified = format!("First line modified\n{}", &large_content[11..]);
+        fs::write(temp_dir.path().join("large.txt"), &modified).unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Large file modified".to_string())).unwrap();
+        
+        // Try to diff with size limit
+        let small_options = DiffOptions {
+            max_file_size: 100, // Very small limit
+            ..Default::default()
+        };
+        
+        let result = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("large.txt"),
+            small_options
+        );
+        
+        // Should fail due to size limit
+        assert!(result.is_err());
+        
+        // Try with larger limit
+        let large_options = DiffOptions {
+            max_file_size: 1024 * 1024 * 100, // 100MB
+            ..Default::default()
+        };
+        let file_diff = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("large.txt"),
+            large_options
+        ).unwrap();
+        
+        // Should succeed and show the change
+        assert_eq!(file_diff.lines_added, 1);
+        assert_eq!(file_diff.lines_deleted, 1);
+    }
+    
+    #[test]
+    fn test_line_diff_unicode() {
+        use crate::types::DiffOptions;
+        
+        let (mut titor, temp_dir, _storage_dir) = create_test_titor();
+        
+        // Create file with unicode content
+        let unicode_content = "Hello 世界\n🦀 Rust\nΓειά σου κόσμε\n";
+        fs::write(temp_dir.path().join("unicode.txt"), unicode_content).unwrap();
+        let checkpoint1 = titor.checkpoint(Some("Unicode v1".to_string())).unwrap();
+        
+        // Modify with more unicode
+        let modified = "Hello 世界\n🦀 Rust 🔥\nΓειά σου κόσμε\n新しい行\n";
+        fs::write(temp_dir.path().join("unicode.txt"), modified).unwrap();
+        let checkpoint2 = titor.checkpoint(Some("Unicode v2".to_string())).unwrap();
+        
+        // Get diff
+        let options = DiffOptions::default();
+        let file_diff = titor.diff_file(
+            &checkpoint1.id,
+            &checkpoint2.id,
+            Path::new("unicode.txt"),
+            options
+        ).unwrap();
+        
+        // Verify unicode handling
+        assert!(!file_diff.is_binary);
+        assert_eq!(file_diff.lines_added, 2); // Modified line + new line
+        assert_eq!(file_diff.lines_deleted, 1); // Original emoji line
+    }
+    
+    #[test]
+    fn test_gitignore_creation() {
+        let root_dir = TempDir::new().unwrap();
+        let storage_dir = TempDir::new().unwrap();
+        
+        // Remove the directory created by TempDir
+        std::fs::remove_dir_all(storage_dir.path()).ok();
+        
+        let gitignore_path = root_dir.path().join(".gitignore");
+        assert!(!gitignore_path.exists(), ".gitignore should not exist initially");
+        
+        // Initialize Titor
+        let _titor = Titor::init(
+            root_dir.path().to_path_buf(),
+            storage_dir.path().to_path_buf(),
+        ).unwrap();
+        
+        // Check that .gitignore was created
+        assert!(gitignore_path.exists(), ".gitignore should be created");
+        
+        // Read .gitignore content
+        let content = fs::read_to_string(&gitignore_path).unwrap();
+        assert!(content.contains(".titor"), ".gitignore should contain .titor");
+    }
+    
+    #[test]
+    fn test_gitignore_existing_file() {
+        let root_dir = TempDir::new().unwrap();
+        let storage_dir = TempDir::new().unwrap();
+        
+        // Remove the directory created by TempDir
+        std::fs::remove_dir_all(storage_dir.path()).ok();
+        
+        // Create .gitignore with existing content
+        let gitignore_path = root_dir.path().join(".gitignore");
+        fs::write(&gitignore_path, "*.log\nnode_modules/\n").unwrap();
+        
+        // Initialize Titor
+        let _titor = Titor::init(
+            root_dir.path().to_path_buf(),
+            storage_dir.path().to_path_buf(),
+        ).unwrap();
+        
+        // Read .gitignore content
+        let content = fs::read_to_string(&gitignore_path).unwrap();
+        
+        // Check that existing content is preserved
+        assert!(content.contains("*.log"), "Existing content should be preserved");
+        assert!(content.contains("node_modules/"), "Existing content should be preserved");
+        
+        // Check that .titor was added
+        assert!(content.contains(".titor"), ".gitignore should contain .titor");
+        
+        // Verify the content structure
+        let lines: Vec<&str> = content.lines().collect();
+        assert!(lines.contains(&"*.log"));
+        assert!(lines.contains(&"node_modules/"));
+        assert!(lines.contains(&".titor"));
+    }
+    
+    #[test]
+    fn test_gitignore_already_contains_titor() {
+        let root_dir = TempDir::new().unwrap();
+        let storage_dir = TempDir::new().unwrap();
+        
+        // Remove the directory created by TempDir
+        std::fs::remove_dir_all(storage_dir.path()).ok();
+        
+        // Create .gitignore with .titor already in it
+        let gitignore_path = root_dir.path().join(".gitignore");
+        fs::write(&gitignore_path, "*.log\n.titor\nnode_modules/\n").unwrap();
+        let original_content = fs::read_to_string(&gitignore_path).unwrap();
+        
+        // Initialize Titor
+        let _titor = Titor::init(
+            root_dir.path().to_path_buf(),
+            storage_dir.path().to_path_buf(),
+        ).unwrap();
+        
+        // Read .gitignore content after init
+        let new_content = fs::read_to_string(&gitignore_path).unwrap();
+        
+        // Content should remain unchanged
+        assert_eq!(original_content, new_content, ".gitignore should not be modified if .titor already exists");
+    }
+    
+    #[test]
+    fn test_gitignore_on_open() {
+        let root_dir = TempDir::new().unwrap();
+        let storage_dir = TempDir::new().unwrap();
+        
+        // Remove the directory created by TempDir
+        std::fs::remove_dir_all(storage_dir.path()).ok();
+        
+        // Initialize Titor first
+        let _titor = Titor::init(
+            root_dir.path().to_path_buf(),
+            storage_dir.path().to_path_buf(),
+        ).unwrap();
+        
+        // Remove .gitignore
+        let gitignore_path = root_dir.path().join(".gitignore");
+        fs::remove_file(&gitignore_path).unwrap();
+        assert!(!gitignore_path.exists());
+        
+        // Open existing Titor storage
+        let _titor2 = Titor::open(
+            root_dir.path().to_path_buf(),
+            storage_dir.path().to_path_buf(),
+        ).unwrap();
+        
+        // Check that .gitignore was recreated
+        assert!(gitignore_path.exists(), ".gitignore should be created on open");
+        let content = fs::read_to_string(&gitignore_path).unwrap();
+        assert!(content.contains(".titor"), ".gitignore should contain .titor");
     }
 } 

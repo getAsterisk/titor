@@ -628,9 +628,86 @@ pub fn read_symlink(path: &Path) -> Result<PathBuf> {
     Ok(fs::read_link(path)?)
 }
 
-
-
-
+/// Ensure a specific entry exists in .gitignore file
+///
+/// Checks if the specified entry exists in a .gitignore file and adds it if missing.
+/// If the .gitignore file doesn't exist, it creates one. The entry is appended
+/// to the end of the file if not already present.
+///
+/// # Arguments
+///
+/// * `gitignore_path` - Path to the .gitignore file
+/// * `entry` - The entry to ensure exists in .gitignore
+///
+/// # Returns
+///
+/// Returns `Ok(true)` if the entry was added, `Ok(false)` if it already existed.
+///
+/// # Errors
+///
+/// - [`TitorError::Io`] if file operations fail
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use crate::utils::ensure_gitignore_has_entry;
+/// use std::path::Path;
+///
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // Ensure .titor is in .gitignore
+/// let added = ensure_gitignore_has_entry(Path::new(".gitignore"), ".titor")?;
+/// if added {
+///     println!("Added .titor to .gitignore");
+/// } else {
+///     println!(".titor already in .gitignore");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # Notes
+///
+/// - The function performs a simple line-by-line check for the entry
+/// - Comments in .gitignore are preserved
+/// - The entry is added with a newline if the file doesn't end with one
+/// - The function is case-sensitive
+pub fn ensure_gitignore_has_entry(gitignore_path: &Path, entry: &str) -> Result<bool> {
+    use std::io::Write;
+    
+    // Read existing content or create empty string
+    let content = if gitignore_path.exists() {
+        fs::read_to_string(gitignore_path)?
+    } else {
+        String::new()
+    };
+    
+    // Check if entry already exists (as a line)
+    let entry_exists = content
+        .lines()
+        .any(|line| line.trim() == entry);
+    
+    if entry_exists {
+        trace!("{} already exists in .gitignore", entry);
+        return Ok(false);
+    }
+    
+    // Append the entry
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(gitignore_path)?;
+    
+    // Add newline if file doesn't end with one
+    if !content.is_empty() && !content.ends_with('\n') {
+        writeln!(file)?;
+    }
+    
+    // Write the entry
+    writeln!(file, "{}", entry)?;
+    
+    trace!("Added {} to .gitignore", entry);
+    Ok(true)
+}
 
 #[cfg(test)]
 mod tests {
@@ -713,5 +790,39 @@ mod tests {
         // Don't remove non-empty directory
         assert!(!remove_dir_if_empty(&non_empty_dir).unwrap());
         assert!(non_empty_dir.exists());
+    }
+    
+    #[test]
+    fn test_ensure_gitignore_has_entry() {
+        let temp_dir = TempDir::new().unwrap();
+        let gitignore_path = temp_dir.path().join(".gitignore");
+        
+        // Test 1: Create new .gitignore with entry
+        let added = ensure_gitignore_has_entry(&gitignore_path, ".titor").unwrap();
+        assert!(added, "Should return true when adding new entry");
+        assert!(gitignore_path.exists(), ".gitignore should be created");
+        
+        let content = std::fs::read_to_string(&gitignore_path).unwrap();
+        assert_eq!(content.trim(), ".titor");
+        
+        // Test 2: Entry already exists
+        let added = ensure_gitignore_has_entry(&gitignore_path, ".titor").unwrap();
+        assert!(!added, "Should return false when entry already exists");
+        
+        // Test 3: Add another entry
+        let added = ensure_gitignore_has_entry(&gitignore_path, "*.log").unwrap();
+        assert!(added, "Should return true when adding new entry");
+        
+        let content = std::fs::read_to_string(&gitignore_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines, vec![".titor", "*.log"]);
+        
+        // Test 4: Handle file without trailing newline
+        std::fs::write(&gitignore_path, "no-newline").unwrap();
+        let added = ensure_gitignore_has_entry(&gitignore_path, "test").unwrap();
+        assert!(added);
+        
+        let content = std::fs::read_to_string(&gitignore_path).unwrap();
+        assert!(content.contains("no-newline\ntest"));
     }
 } 

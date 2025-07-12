@@ -5,7 +5,7 @@
 //! ## Features
 //! - Create and manage checkpoints of directory states
 //! - Navigate through timeline history
-//! - Compare changes between checkpoints
+//! - Compare changes between checkpoints with line-level diffs
 //! - Verify checkpoint integrity
 //! - Optimize storage with garbage collection
 //!
@@ -22,6 +22,9 @@
 //! 
 //! # Restore to a checkpoint
 //! titor restore <checkpoint-id>
+//! 
+//! # Compare checkpoints with line-level diff
+//! titor diff <from-id> <to-id> --lines
 //! ```
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -135,6 +138,22 @@ enum Commands {
 
         /// To checkpoint
         to: String,
+        
+        /// Show line-level differences (like git diff)
+        #[arg(short, long)]
+        lines: bool,
+        
+        /// Number of context lines to show
+        #[arg(long, default_value = "3")]
+        context: usize,
+        
+        /// Show only statistics
+        #[arg(long)]
+        stat: bool,
+        
+        /// Ignore whitespace changes
+        #[arg(long)]
+        ignore_whitespace: bool,
     },
 
     /// Verify integrity
@@ -218,8 +237,8 @@ fn run(cli: Cli) -> Result<()> {
         Commands::Fork { checkpoint, message } => {
             cmd_fork(root_path, storage_path, checkpoint, message)
         }
-        Commands::Diff { from, to } => {
-            cmd_diff(root_path, storage_path, from, to)
+        Commands::Diff { from, to, lines, context, stat, ignore_whitespace } => {
+            cmd_diff(root_path, storage_path, from, to, lines, context, stat, ignore_whitespace)
         }
         Commands::Verify { checkpoint, all } => {
             cmd_verify(root_path, storage_path, checkpoint, all)
@@ -584,11 +603,16 @@ fn cmd_fork(
 /// - Files added, modified, or deleted
 /// - Size changes
 /// - Statistics about changes
+/// - Line-level differences (with --lines flag)
 fn cmd_diff(
     root_path: PathBuf,
     storage_path: PathBuf,
     from_id: String,
     to_id: String,
+    show_lines: bool,
+    context_lines: usize,
+    stat_only: bool,
+    ignore_whitespace: bool,
 ) -> Result<()> {
     let titor = open_titor(root_path, storage_path)?;
     
@@ -612,22 +636,126 @@ fn cmd_diff(
     );
     println!();
 
-    let diff = titor.diff(&from_id_full, &to_id_full)?;
-    
-    // Summary
+    // Get the diff based on whether we want line-level details
+    if show_lines && !stat_only {
+        // Get detailed diff with line-level changes
+        let options = titor::types::DiffOptions {
+            context_lines,
+            ignore_whitespace,
+            show_line_numbers: true,
+            max_file_size: 10 * 1024 * 1024, // 10MB
+        };
+        
+        let detailed_diff = titor.diff_detailed(&from_id_full, &to_id_full, options)?;
+        
+        // Show summary statistics first
+        show_diff_stats(&detailed_diff.basic_diff, detailed_diff.total_lines_added, detailed_diff.total_lines_deleted);
+        
+        if !stat_only {
+            // Show line-level diffs for each file
+            for file_diff in &detailed_diff.file_diffs {
+                println!("\n{} {}", "diff --git".dimmed(), file_diff.path.display().to_string().cyan());
+                println!("{} a/{}", "---".dimmed(), file_diff.path.display());
+                println!("{} b/{}", "+++".dimmed(), file_diff.path.display());
+                
+                if file_diff.is_binary {
+                    println!("{}", "Binary files differ".yellow());
+                    continue;
+                }
+                
+                // Print hunks
+                for hunk in &file_diff.hunks {
+                    println!("{} @@ -{},{} +{},{} @@", 
+                        "@@".cyan(),
+                        hunk.from_line, hunk.from_count,
+                        hunk.to_line, hunk.to_count
+                    );
+                    
+                    for change in &hunk.changes {
+                        match change {
+                            titor::types::LineChange::Added(_, content) => {
+                                println!("{}{}", "+".green(), content.green());
+                            }
+                            titor::types::LineChange::Deleted(_, content) => {
+                                println!("{}{}", "-".red(), content.red());
+                            }
+                            titor::types::LineChange::Context(_, content) => {
+                                println!(" {}", content.dimmed());
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Show file lists for added/deleted files
+            if !detailed_diff.basic_diff.added_files.is_empty() {
+                println!("\n{}", "Added files:".green().bold());
+                for file in &detailed_diff.basic_diff.added_files {
+                    println!("  + {}", file.path.display().to_string().green());
+                }
+            }
+            
+            if !detailed_diff.basic_diff.deleted_files.is_empty() {
+                println!("\n{}", "Deleted files:".red().bold());
+                for file in &detailed_diff.basic_diff.deleted_files {
+                    println!("  - {}", file.path.display().to_string().red());
+                }
+            }
+        }
+    } else {
+        // Basic file-level diff
+        let diff = titor.diff(&from_id_full, &to_id_full)?;
+        
+        if stat_only {
+            show_diff_stats(&diff, 0, 0);
+        } else {
+            show_basic_diff(&diff);
+        }
+    }
+
+    Ok(())
+}
+
+/// Show diff statistics
+fn show_diff_stats(
+    diff: &titor::types::CheckpointDiff, 
+    lines_added: usize, 
+    lines_deleted: usize
+) {
     println!("{}", "Summary:".bold());
-    println!("  Added: {} files ({})", 
-        diff.stats.files_added.to_string().green(),
-        format_bytes(diff.stats.bytes_added).green()
-    );
-    println!("  Modified: {} files ({})", 
-        diff.stats.files_modified.to_string().yellow(),
-        format_bytes(diff.stats.bytes_modified).yellow()
-    );
-    println!("  Deleted: {} files ({})", 
-        diff.stats.files_deleted.to_string().red(),
-        format_bytes(diff.stats.bytes_deleted).red()
-    );
+    
+    if lines_added > 0 || lines_deleted > 0 {
+        // Show line-level stats if available
+        let net_lines = lines_added as i32 - lines_deleted as i32;
+        let sign = if net_lines >= 0 { "+" } else { "" };
+        
+        println!("  {} files changed, {} insertions(+), {} deletions(-)",
+            diff.stats.total_operations(),
+            lines_added.to_string().green(),
+            lines_deleted.to_string().red()
+        );
+        println!("  Net lines: {}{}", sign, net_lines);
+    } else {
+        // File-level stats only
+        println!("  Added: {} files ({})", 
+            diff.stats.files_added.to_string().green(),
+            format_bytes(diff.stats.bytes_added).green()
+        );
+        println!("  Modified: {} files ({})", 
+            diff.stats.files_modified.to_string().yellow(),
+            format_bytes(diff.stats.bytes_modified).yellow()
+        );
+        println!("  Deleted: {} files ({})", 
+            diff.stats.files_deleted.to_string().red(),
+            format_bytes(diff.stats.bytes_deleted).red()
+        );
+    }
+}
+
+/// Show basic file-level diff
+fn show_basic_diff(diff: &titor::types::CheckpointDiff) {
+    // Summary
+    show_diff_stats(diff, 0, 0);
     
     // File lists
     if !diff.added_files.is_empty() {
@@ -659,8 +787,6 @@ fn cmd_diff(
             println!("  ... and {} more", diff.deleted_files.len() - 10);
         }
     }
-
-    Ok(())
 }
 
 /// Verify checkpoint integrity

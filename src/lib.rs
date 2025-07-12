@@ -12,6 +12,7 @@
 //! - Efficiently store only changed files using content-addressable storage
 //! - Verify checkpoint integrity using Merkle trees
 //! - Navigate through checkpoint history with a timeline interface
+//! - Compare checkpoints with line-level differences like git diff
 //!
 //! ## Architecture
 //!
@@ -120,6 +121,47 @@
 //! # }
 //! ```
 //!
+//! ### Line-Level Diffs
+//!
+//! ```rust,no_run
+//! # use titor::{Titor, types::DiffOptions};
+//! # use std::path::PathBuf;
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let titor = Titor::init(PathBuf::from("."), PathBuf::from(".titor"))?;
+//! // Get detailed diff with line-level changes
+//! let options = DiffOptions {
+//!     context_lines: 3,
+//!     ignore_whitespace: false,
+//!     show_line_numbers: true,
+//!     max_file_size: 10 * 1024 * 1024, // 10MB
+//! };
+//!
+//! let detailed_diff = titor.diff_detailed("checkpoint1", "checkpoint2", options)?;
+//!
+//! println!("Files changed: {}, +{} -{} lines",
+//!     detailed_diff.basic_diff.stats.total_operations(),
+//!     detailed_diff.total_lines_added,
+//!     detailed_diff.total_lines_deleted
+//! );
+//!
+//! // Print unified diff for each file
+//! for file_diff in &detailed_diff.file_diffs {
+//!     if !file_diff.is_binary {
+//!         println!("\n--- a/{}", file_diff.path.display());
+//!         println!("+++ b/{}", file_diff.path.display());
+//!         
+//!         for hunk in &file_diff.hunks {
+//!             println!("@@ -{},{} +{},{} @@",
+//!                 hunk.from_line, hunk.from_count,
+//!                 hunk.to_line, hunk.to_count
+//!             );
+//!         }
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Key Concepts
 //!
 //! ### Checkpoints
@@ -191,22 +233,24 @@
 //! - [`verification`]: Integrity checking and verification
 //! - [`types`]: Common types and data structures
 //! - [`error`]: Error types and handling
+//! - [`diff`]: File content comparison and diffing
 
 // Public API modules
 pub mod checkpoint;
 pub mod compression;
+pub mod diff;
 pub mod error;
-pub mod titor;
 pub mod timeline;
 pub mod types;
-pub mod verification;
 
 // Internal modules (not part of public API)
 mod collections;
 mod file_tracking;
 mod merkle;
 pub mod storage;
+pub mod titor;
 mod utils;
+pub mod verification;
 
 // Re-export main types for convenience
 pub use checkpoint::{Checkpoint, CheckpointMetadata};

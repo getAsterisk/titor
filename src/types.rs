@@ -231,6 +231,102 @@ pub struct CheckpointDiff {
     pub stats: ChangeStats,
 }
 
+/// Represents a single line change in a diff
+///
+/// This enum represents different types of line changes in a unified diff format.
+/// Each variant contains the line number and content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LineChange {
+    /// Line added in the new version (line_number in new file, content)
+    Added(usize, String),
+    /// Line deleted from the old version (line_number in old file, content)
+    Deleted(usize, String),
+    /// Context line that exists in both versions (line_number in old file, content)
+    Context(usize, String),
+}
+
+/// A contiguous block of changes in a file diff
+///
+/// A hunk represents a section of the file where changes occur, along with
+/// surrounding context lines. This is similar to git's unified diff format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiffHunk {
+    /// Starting line number in the source file
+    pub from_line: usize,
+    /// Number of lines from the source file in this hunk
+    pub from_count: usize,
+    /// Starting line number in the target file
+    pub to_line: usize,
+    /// Number of lines in the target file in this hunk
+    pub to_count: usize,
+    /// The actual line changes in this hunk
+    pub changes: Vec<LineChange>,
+}
+
+/// Line-level diff information for a single file
+///
+/// Contains detailed information about changes to a file, including
+/// line-by-line differences organized into hunks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileDiff {
+    /// Path of the file being diffed
+    pub path: PathBuf,
+    /// Content hash in the source checkpoint
+    pub from_hash: String,
+    /// Content hash in the target checkpoint
+    pub to_hash: String,
+    /// Whether this is a binary file (no line diff available)
+    pub is_binary: bool,
+    /// Diff hunks containing line changes
+    pub hunks: Vec<DiffHunk>,
+    /// Total number of lines added
+    pub lines_added: usize,
+    /// Total number of lines deleted
+    pub lines_deleted: usize,
+}
+
+/// Options for controlling diff generation
+///
+/// These options allow fine-tuning how diffs are generated and displayed.
+#[derive(Debug, Clone)]
+pub struct DiffOptions {
+    /// Number of context lines to show around changes (default: 3)
+    pub context_lines: usize,
+    /// Whether to ignore whitespace changes
+    pub ignore_whitespace: bool,
+    /// Whether to show line numbers in the output
+    pub show_line_numbers: bool,
+    /// Maximum file size to compute line diffs for (default: 10MB)
+    pub max_file_size: u64,
+}
+
+impl Default for DiffOptions {
+    fn default() -> Self {
+        Self {
+            context_lines: 3,
+            ignore_whitespace: false,
+            show_line_numbers: true,
+            max_file_size: 10 * 1024 * 1024, // 10MB
+        }
+    }
+}
+
+/// Enhanced checkpoint diff with line-level changes
+///
+/// This extends the basic CheckpointDiff with detailed line-level
+/// diff information for modified text files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetailedCheckpointDiff {
+    /// Basic diff information
+    pub basic_diff: CheckpointDiff,
+    /// Line-level diffs for modified files
+    pub file_diffs: Vec<FileDiff>,
+    /// Total lines added across all files
+    pub total_lines_added: usize,
+    /// Total lines deleted across all files
+    pub total_lines_deleted: usize,
+}
+
 /// Statistics from garbage collection
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GcStats {

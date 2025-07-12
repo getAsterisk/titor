@@ -43,6 +43,7 @@
 - **Timeline Branching**: Git-like branching model supporting multiple independent timelines
 - **Atomic Operations**: All checkpoint and restore operations are atomic with rollback on failure
 - **Memory Efficient**: Streaming architecture for large files without full memory loading
+- **Line-Level Diffs**: Git-like unified diff output showing exactly what changed between checkpoints
 
 ### Technical Specifications
 
@@ -136,6 +137,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Line-Level Diff Example
+
+```rust
+use titor::types::DiffOptions;
+
+// Get detailed diff with line-level changes
+let options = DiffOptions {
+    context_lines: 3,
+    ignore_whitespace: false,
+    show_line_numbers: true,
+    max_file_size: 10 * 1024 * 1024, // 10MB
+};
+
+let detailed_diff = titor.diff_detailed(&checkpoint1.id, &checkpoint2.id, options)?;
+
+// Display results
+println!("Total lines added: {}", detailed_diff.total_lines_added);
+println!("Total lines deleted: {}", detailed_diff.total_lines_deleted);
+
+for file_diff in &detailed_diff.file_diffs {
+    println!("\nFile: {:?}", file_diff.path);
+    
+    for hunk in &file_diff.hunks {
+        println!("@@ -{},{} +{},{} @@", 
+            hunk.from_line, hunk.from_count,
+            hunk.to_line, hunk.to_count);
+            
+        for change in &hunk.changes {
+            match change {
+                LineChange::Added(_, line) => println!("+{}", line),
+                LineChange::Deleted(_, line) => println!("-{}", line),
+                LineChange::Context(_, line) => println!(" {}", line),
+            }
+        }
+    }
+}
+```
+
 ### Advanced Configuration
 
 ```rust
@@ -179,8 +218,14 @@ impl Titor {
     /// Create a new branch from existing checkpoint
     pub fn fork(&mut self, checkpoint_id: &str, description: Option<String>) -> Result<Checkpoint>;
     
-    /// Compare two checkpoints
+    /// Compare two checkpoints (file-level)
     pub fn diff(&self, from_id: &str, to_id: &str) -> Result<CheckpointDiff>;
+    
+    /// Compare file with line-level differences
+    pub fn diff_file(&self, from_id: &str, to_id: &str, path: &Path, options: DiffOptions) -> Result<FileDiff>;
+    
+    /// Get detailed diff with line-level changes for all files
+    pub fn diff_detailed(&self, from_id: &str, to_id: &str, options: DiffOptions) -> Result<DetailedCheckpointDiff>;
     
     /// Garbage collect unreferenced objects
     pub fn gc(&self) -> Result<GcStats>;
@@ -226,6 +271,33 @@ pub struct Checkpoint {
     pub metadata: CheckpointMetadata,        // Size, file count, etc.
     pub state_hash: String,                  // SHA-256 of checkpoint state
     pub content_merkle_root: String,         // Merkle tree root hash
+}
+```
+
+#### `DiffOptions`
+
+Configure line-level diff generation.
+
+```rust
+pub struct DiffOptions {
+    pub context_lines: usize,      // Lines of context (default: 3)
+    pub ignore_whitespace: bool,   // Ignore whitespace changes
+    pub show_line_numbers: bool,   // Include line numbers
+    pub max_file_size: u64,       // Max file size for diffs (default: 10MB)
+}
+```
+
+#### `FileDiff`
+
+Line-level diff information for a single file.
+
+```rust
+pub struct FileDiff {
+    pub path: PathBuf,
+    pub is_binary: bool,
+    pub hunks: Vec<DiffHunk>,     // Contiguous blocks of changes
+    pub lines_added: usize,
+    pub lines_deleted: usize,
 }
 ```
 
@@ -340,6 +412,18 @@ titor timeline
 
 # Compare checkpoints
 titor diff <from-id> <to-id>
+
+# Compare with line-level differences (git-like)
+titor diff <from-id> <to-id> --lines
+
+# Compare with custom context lines
+titor diff <from-id> <to-id> --lines --context 5
+
+# Show only statistics
+titor diff <from-id> <to-id> --stat
+
+# Ignore whitespace changes
+titor diff <from-id> <to-id> --lines --ignore-whitespace
 
 # Verify integrity
 titor verify --all
