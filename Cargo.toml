@@ -1,6 +1,6 @@
 [package]
 name = "titor"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 authors = ["Mufeed VH <mufeed@asterisk.so>"]
 description = "A high-performance checkpointing library for time-travel through directory states"
@@ -46,10 +46,11 @@ num_cpus = "1.17"
 tokio = { version = "1.46", features = ["rt", "rt-multi-thread", "macros", "time", "fs", "sync"] }
 
 # Progress reporting
-indicatif = { version = "0.18", optional = true }
+indicatif = "0.18"
 
 # CLI
-clap = { version = "4.5", features = ["derive"], optional = true }
+clap = { version = "4.5", features = ["derive", "cargo"] }
+colored = "3.0"
 
 # Logging
 tracing = "0.1"
@@ -76,18 +77,9 @@ rand = "0.9"
 tracing-test = "0.2"
 filetime = "0.2"
 
-# CLI dependencies
-clap = { version = "4.5", features = ["derive", "cargo"] }
-colored = "3.0"
-indicatif = "0.18"
-
-[profile.release]
-lto = true
-codegen-units = 1
-opt-level = 3
-
-[profile.bench]
-inherits = "release"
+[[bin]]
+name = "titor"
+path = "src/bin/titor.rs"
 
 [[example]]
 name = "titor_cli"
@@ -101,6 +93,14 @@ required-features = ["rmcp", "schemars"]
 [[bench]]
 name = "titor_bench"
 harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
 
 [package.metadata.docs.rs]
 # Build docs without gxhash to avoid CPU feature requirements

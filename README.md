@@ -96,7 +96,13 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-titor = "0.1.2"
+titor = "0.2.0"
+```
+
+Or install the CLI tool with:
+
+```bash
+cargo install titor
 ```
 
 ### Dependencies
@@ -389,7 +395,10 @@ Titor includes a comprehensive command-line interface.
 ### Installation
 
 ```bash
-cargo install titor-cli
+# Install the titor CLI from crates.io
+cargo install titor
+# Or install from local path
+cargo install --path .
 ```
 
 ### Commands
