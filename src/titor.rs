@@ -50,7 +50,9 @@
 use crate::checkpoint::{Checkpoint, CheckpointMetadataBuilder};
 use crate::compression::{CompressionEngine, CompressionStrategy};
 use crate::error::{Result, TitorError};
-use crate::file_tracking::{FileTracker, create_manifest, create_file_map};
+use crate::file_tracking::{FileTracker, create_manifest, create_file_map, process_file_entry};
+use crate::fs_watcher::FsWatcher;
+use crate::index::CheckpointIndex;
 use crate::merkle::{MerkleTree, FileEntryHashBuilder};
 use crate::storage::Storage;
 use crate::timeline::Timeline;
@@ -109,6 +111,8 @@ pub struct Titor {
     hooks: Arc<Mutex<Vec<Box<dyn CheckpointHook>>>>,
     /// File tracker
     file_tracker: FileTracker,
+    /// File system watcher for real-time change tracking
+    watcher: Option<FsWatcher>,
 }
 
 impl std::fmt::Debug for Titor {
@@ -121,6 +125,7 @@ impl std::fmt::Debug for Titor {
             .field("auto_checkpoint_strategy", &self.auto_checkpoint_strategy)
             .field("hooks", &format!("<{} hooks>", self.hooks.lock().len()))
             .field("file_tracker", &self.file_tracker)
+            .field("watcher", &self.watcher.is_some())
             .finish()
     }
 }
@@ -207,6 +212,23 @@ impl Titor {
             debug!("Ensured .titor is in .gitignore");
         }
         
+        // Initialize file system watcher
+        let watcher = match FsWatcher::new(&root_path) {
+            Ok(w) => {
+                if let Err(e) = w.watch() {
+                    warn!("Failed to start file system watcher: {}", e);
+                    None
+                } else {
+                    info!("File system watcher initialized");
+                    Some(w)
+                }
+            }
+            Err(e) => {
+                warn!("Failed to initialize file system watcher: {}", e);
+                None
+            }
+        };
+        
         Ok(Self {
             root_path,
             storage: Arc::new(storage),
@@ -215,6 +237,7 @@ impl Titor {
             auto_checkpoint_strategy: Arc::new(Mutex::new(AutoCheckpointStrategy::Disabled)),
             hooks: Arc::new(Mutex::new(Vec::new())),
             file_tracker,
+            watcher,
         })
     }
     
@@ -289,6 +312,23 @@ impl Titor {
             debug!("Ensured .titor is in .gitignore");
         }
         
+        // Initialize file system watcher
+        let watcher = match FsWatcher::new(&root_path) {
+            Ok(w) => {
+                if let Err(e) = w.watch() {
+                    warn!("Failed to start file system watcher: {}", e);
+                    None
+                } else {
+                    info!("File system watcher initialized");
+                    Some(w)
+                }
+            }
+            Err(e) => {
+                warn!("Failed to initialize file system watcher: {}", e);
+                None
+            }
+        };
+        
         Ok(Self {
             root_path,
             storage: Arc::new(storage),
@@ -297,6 +337,7 @@ impl Titor {
             auto_checkpoint_strategy: Arc::new(Mutex::new(AutoCheckpointStrategy::Disabled)),
             hooks: Arc::new(Mutex::new(Vec::new())),
             file_tracker,
+            watcher,
         })
     }
     
@@ -359,17 +400,119 @@ impl Titor {
     /// - Empty directories are preserved
     #[instrument(skip(self))]
     pub fn checkpoint(&mut self, description: Option<String>) -> Result<Checkpoint> {
-        info!("Creating checkpoint: {:?}", description);
+        self.checkpoint_with_options(CheckpointOptions {
+            description,
+            ..Default::default()
+        })
+    }
+    
+    /// Create a new checkpoint with options
+    ///
+    /// This method provides the full checkpoint creation functionality with
+    /// support for all optimization features including file system watching
+    /// and index-based change detection.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Checkpoint creation options including description, verify flag, etc.
+    ///
+    /// # Returns
+    ///
+    /// Returns the newly created `Checkpoint` containing its ID and metadata.
+    #[instrument(skip(self, options))]
+    pub fn checkpoint_with_options(&mut self, options: CheckpointOptions) -> Result<Checkpoint> {
+        info!("Creating checkpoint: {:?}", options.description);
         let start = Instant::now();
         
         // Get current checkpoint for parent
         let parent_id = self.timeline.read().current_checkpoint_id.clone();
         
-        // Scan files
-        debug!("Scanning directory for changes");
-        let mut file_entries = self.file_tracker.scan_directory(Some(|info: ProgressInfo| {
-            trace!("Scanned: {:?}", info.current_item);
-        }))?;
+        // Load parent index if available
+        let parent_index = if let Some(ref pid) = parent_id {
+            match CheckpointIndex::new(&self.storage.path(), pid) {
+                Ok(idx) => Some(idx),
+                Err(e) => {
+                    warn!("Failed to load parent index: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        // Check if we can use watcher-based optimization
+        let use_watcher = self.watcher.as_ref()
+            .map(|w| w.has_events() && !w.missed_events())
+            .unwrap_or(false);
+        
+        let mut file_entries = if use_watcher && !options.verify.unwrap_or(false) {
+            info!("Using file system watcher for optimized checkpoint");
+            
+            // Get events from watcher
+            let events = self.watcher.as_ref().unwrap().drain()?;
+            let mut entries = Vec::new();
+            let mut deleted_paths = Vec::new();
+            
+            // Process each event
+            for event in events {
+                match event {
+                    FsEvent::Add(path) | FsEvent::Modify(path) => {
+                        // Process the file/directory
+                        let full_path = self.root_path.join(&path);
+                        if let Ok(Some(entry)) = process_file_entry(
+                            &full_path,
+                            &self.root_path,
+                            self.config.max_file_size,
+                            full_path.is_dir()
+                        ) {
+                            entries.push(entry);
+                        }
+                    }
+                    FsEvent::Delete(path) => {
+                        deleted_paths.push(path);
+                    }
+                }
+            }
+            
+            // If we have a parent index, merge with unchanged files
+            if let Some(ref parent_idx) = parent_index {
+                let mut all_entries = Vec::new();
+                
+                // Add modified/new entries
+                let modified_paths: std::collections::HashSet<_> = entries.iter()
+                    .map(|e| e.path.clone())
+                    .collect();
+                all_entries.extend(entries);
+                
+                // Add unchanged entries from parent
+                for result in parent_idx.iter() {
+                    if let Ok((path, _)) = result {
+                        if !modified_paths.contains(&path) && !deleted_paths.contains(&path) {
+                            // Get the file entry from parent manifest
+                            if let Ok(parent_manifest) = self.storage.load_manifest(parent_id.as_ref().unwrap()) {
+                                if let Some(entry) = parent_manifest.files.iter().find(|e| e.path == path) {
+                                    all_entries.push(entry.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                all_entries
+            } else {
+                entries
+            }
+        } else {
+            // Fall back to full scan with index optimization
+            debug!("Scanning directory with index optimization");
+            self.file_tracker.scan_with_index(
+                parent_index.as_ref(),
+                options.verify.unwrap_or(false),
+                Some(|info: ProgressInfo| {
+                    trace!("Scanned: {:?}", info.current_item);
+                })
+            )?
+        };
         
         // Store file contents in parallel using rayon
         debug!("Storing {} files", file_entries.len());
@@ -468,7 +611,7 @@ impl Titor {
         // Create checkpoint
         let checkpoint = Checkpoint::new(
             parent_id,
-            description,
+            options.description,
             metadata,
             merkle_root.clone(),
         );
@@ -477,10 +620,45 @@ impl Titor {
         self.storage.store_checkpoint(&checkpoint)?;
         let manifest = create_manifest(
             checkpoint.id.clone(),
-            file_entries,
+            file_entries.clone(),
             merkle_root,
         );
         self.storage.store_manifest(&manifest)?;
+        
+        // Create and save index for this checkpoint
+        debug!("Creating checkpoint index");
+        let new_index = CheckpointIndex::new(&self.storage.path(), &checkpoint.id)?;
+        for entry in &file_entries {
+            // Get file metadata for index
+            let file_path = self.root_path.join(&entry.path);
+            if let Ok(metadata) = utils::get_file_metadata(&file_path) {
+                let mtime_dt: chrono::DateTime<chrono::Utc> = metadata.modified.into();
+                let index_entry = IndexEntry {
+                    size: entry.size,
+                    mtime_ns: mtime_dt.timestamp_nanos_opt().unwrap_or(0),
+                    ctime_ns: 0, // We don't track creation time in FileMetadata
+                    hash: entry.content_hash.clone(),
+                    mode: entry.permissions,
+                    is_dir: entry.is_directory,
+                    dir_hash: None, // Will be computed later
+                };
+                new_index.insert(&entry.path, index_entry)?;
+            }
+        }
+        
+        // Compute directory hashes
+        let mut directories: Vec<_> = file_entries.iter()
+            .filter(|e| e.is_directory)
+            .map(|e| e.path.clone())
+            .collect();
+        directories.sort_by(|a, b| b.components().count().cmp(&a.components().count())); // Process deepest first
+        
+        for dir_path in directories {
+            new_index.update_dir_hash(&dir_path)?;
+        }
+        
+        // Flush index to disk
+        new_index.flush()?;
         
         // Flush reference count updates
         self.storage.flush_ref_counts()?;
@@ -497,6 +675,12 @@ impl Titor {
 
         // Persist timeline state
         self.save_timeline()?;
+        
+        // Reset watcher after checkpoint
+        if let Some(ref mut watcher) = self.watcher {
+            debug!("Resetting file system watcher");
+            let _ = watcher.drain(); // Clear any remaining events
+        }
         
         // Call post-checkpoint hooks
         for hook in self.hooks.lock().iter() {

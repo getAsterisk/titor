@@ -409,6 +409,28 @@ impl Storage {
         })
     }
     
+    /// Get the storage root path
+    ///
+    /// Returns the root directory path of this storage instance.
+    ///
+    /// # Returns
+    ///
+    /// A reference to the storage root path.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # use titor::Storage;
+    /// # use std::path::PathBuf;
+    /// # fn example(storage: &Storage) {
+    /// let storage_path = storage.path();
+    /// println!("Storage located at: {}", storage_path.display());
+    /// # }
+    /// ```
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+    
     /// Store file content in the content-addressable storage
     ///
     /// Stores the provided content in the storage system, returning the content's
@@ -638,6 +660,46 @@ impl Storage {
         let manifest_bytes = fs::read(&manifest_path)?;
         let (manifest, _): (FileManifest, _) = bincode::serde::decode_from_slice(&manifest_bytes, bincode::config::standard())?;
         Ok(manifest)
+    }
+    
+    /// Load manifest using memory mapping
+    ///
+    /// Loads a checkpoint manifest using memory mapping for zero-copy access.
+    /// This is useful for large manifests where you want to avoid loading
+    /// the entire manifest into memory.
+    ///
+    /// # Arguments
+    ///
+    /// * `checkpoint_id` - ID of the checkpoint whose manifest to load
+    ///
+    /// # Returns
+    ///
+    /// Returns a memory-mapped file handle that can be used for zero-copy
+    /// deserialization of the manifest.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// # use titor::Storage;
+    /// # fn example(storage: &Storage) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mmap = storage.load_manifest_mmap("checkpoint123")?;
+    /// // Use mmap for zero-copy deserialization
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn load_manifest_mmap(&self, checkpoint_id: &str) -> Result<memmap2::Mmap> {
+        let manifest_path = self.root
+            .join("checkpoints")
+            .join(checkpoint_id)
+            .join("manifest.bin");
+        
+        if !manifest_path.exists() {
+            return Err(TitorError::CheckpointNotFound(checkpoint_id.to_string()));
+        }
+        
+        let file = fs::File::open(&manifest_path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        Ok(mmap)
     }
     
     /// List all checkpoints

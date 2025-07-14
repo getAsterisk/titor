@@ -246,6 +246,8 @@ pub mod types;
 // Internal modules (not part of public API)
 mod collections;
 mod file_tracking;
+mod fs_watcher;
+mod index;
 mod merkle;
 pub mod storage;
 pub mod titor;

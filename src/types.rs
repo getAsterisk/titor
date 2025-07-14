@@ -493,6 +493,8 @@ pub struct CheckpointOptions {
     pub metadata: HashMap<String, String>,
     /// Progress callback
     pub progress_callback: Option<ProgressCallback>,
+    /// Whether to force full verification (ignores index trust)
+    pub verify: Option<bool>,
 }
 
 impl std::fmt::Debug for CheckpointOptions {
@@ -502,6 +504,7 @@ impl std::fmt::Debug for CheckpointOptions {
             .field("tags", &self.tags)
             .field("metadata", &self.metadata)
             .field("progress_callback", &self.progress_callback.is_some())
+            .field("verify", &self.verify)
             .finish()
     }
 }
@@ -667,6 +670,40 @@ pub struct TimelineState {
     pub current_checkpoint_id: Option<String>,
     /// Format version for future compatibility
     pub version: u32,
+}
+
+/// Represents a file system event
+///
+/// Used by the file system watcher to track changes in real-time
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FsEvent {
+    /// File or directory was added
+    Add(PathBuf),
+    /// File or directory was modified
+    Modify(PathBuf),
+    /// File or directory was deleted
+    Delete(PathBuf),
+}
+
+/// Entry in the checkpoint index
+///
+/// Stores metadata and hash information for fast change detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexEntry {
+    /// File size in bytes
+    pub size: u64,
+    /// Modification time in nanoseconds since Unix epoch
+    pub mtime_ns: i64,
+    /// Change time in nanoseconds since Unix epoch (Unix-like systems)
+    pub ctime_ns: i64,
+    /// Content hash (SHA-256)
+    pub hash: String,
+    /// File permissions/mode
+    pub mode: u32,
+    /// Whether this is a directory
+    pub is_dir: bool,
+    /// For directories: hash of sorted child hashes
+    pub dir_hash: Option<String>,
 }
 
 #[cfg(test)]

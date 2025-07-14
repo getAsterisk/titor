@@ -197,6 +197,18 @@ impl From<bincode::error::EncodeError> for TitorError {
     }
 }
 
+impl From<sled::Error> for TitorError {
+    fn from(err: sled::Error) -> Self {
+        TitorError::internal(format!("Database error: {}", err))
+    }
+}
+
+impl From<notify::Error> for TitorError {
+    fn from(err: notify::Error) -> Self {
+        TitorError::internal(format!("File watcher error: {}", err))
+    }
+}
+
 impl TitorError {
     /// Create a storage error with a custom message
     pub fn storage(msg: impl Into<String>) -> Self {

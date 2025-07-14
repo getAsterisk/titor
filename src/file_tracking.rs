@@ -138,8 +138,9 @@
 
 use crate::error::Result;
 use crate::merkle::FileEntryHashBuilder;
-use crate::types::{ChangeStats, FileEntry, FileManifest, ProgressInfo};
+use crate::types::{ChangeStats, FileEntry, FileManifest, ProgressInfo, IndexEntry};
 use crate::utils;
+use crate::index::CheckpointIndex;
 use chrono::Utc;
 use ignore::{WalkBuilder, WalkState, overrides::OverrideBuilder};
 use rayon::prelude::*;
@@ -149,7 +150,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 use crate::collections::{HashMap, HashSet, HashSetExt};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace, warn, info};
 
 /// File tracker for detecting changes in a directory
 ///
@@ -594,6 +595,294 @@ impl FileTracker {
         Ok(final_entries)
     }
     
+    /// Scan directory using an index for optimization
+    ///
+    /// This method provides optimized directory scanning by leveraging a checkpoint
+    /// index to avoid re-reading and re-hashing unchanged files. It compares file
+    /// metadata against the index and only processes files that have actually changed.
+    ///
+    /// # Arguments
+    ///
+    /// * `parent_index` - Optional index from parent checkpoint for change detection
+    /// * `verify` - If true, forces full re-hashing of all files (ignores index)
+    /// * `progress_callback` - Optional callback function to report progress
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of `FileEntry` objects with updated index information.
+    ///
+    /// # Performance Benefits
+    ///
+    /// - Skips reading/hashing unchanged files (O(1) metadata check vs O(file size))
+    /// - Can skip entire directory subtrees if directory hash matches
+    /// - Dramatically reduces checkpoint time for small changes in large repos
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use crate::file_tracking::FileTracker;
+    /// use crate::index::CheckpointIndex;
+    /// use std::path::PathBuf;
+    ///
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tracker = FileTracker::new(PathBuf::from("./project"));
+    /// let parent_index = CheckpointIndex::new(
+    ///     &PathBuf::from(".titor"),
+    ///     "parent-checkpoint-id"
+    /// )?;
+    ///
+    /// // Fast scan using index
+    /// let files = tracker.scan_with_index(
+    ///     Some(&parent_index),
+    ///     false, // Don't verify
+    ///     None
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn scan_with_index<F>(
+        &self,
+        parent_index: Option<&CheckpointIndex>,
+        verify: bool,
+        progress_callback: Option<F>,
+    ) -> Result<Vec<FileEntry>>
+    where
+        F: Fn(ProgressInfo) + Send + Sync,
+    {
+        let start = Instant::now();
+        let processed_count = Arc::new(AtomicUsize::new(0));
+        let total_size = Arc::new(AtomicU64::new(0));
+        let skipped_count = Arc::new(AtomicUsize::new(0));
+        let directories_with_files = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+        
+        info!(
+            "Scanning directory with index optimization (verify={})",
+            verify
+        );
+        
+        // Track visited paths for deletion detection
+        let visited_paths = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+        
+        // Clone for closure
+        let root_path = self.root_path.clone();
+        let dirs_with_files_clone = Arc::clone(&directories_with_files);
+        
+        // Build ignore walker
+        let mut walker_builder = WalkBuilder::new(&self.root_path);
+        
+        // Configure walker
+        walker_builder
+            .follow_links(self.follow_symlinks)
+            .hidden(false)
+            .parents(true)
+            .ignore(true)
+            .git_ignore(true)
+            .git_global(false)
+            .git_exclude(false)
+            .require_git(false)
+            .threads(self.parallel_workers);
+        
+        // Build overrides for custom patterns and .titor directory
+        let mut override_builder = OverrideBuilder::new(&self.root_path);
+        
+        // Always ignore .titor directory
+        override_builder.add("!.titor/**").ok();
+        override_builder.add("!.titor/").ok();
+        override_builder.add("!.titor").ok();
+        
+        // Add custom ignore patterns
+        for pattern in &self.ignore_patterns {
+            let final_pattern = if pattern.starts_with('!') {
+                pattern[1..].to_string()
+            } else {
+                format!("!{}", pattern)
+            };
+            
+            if let Err(e) = override_builder.add(&final_pattern) {
+                warn!("Invalid ignore pattern '{}': {}", pattern, e);
+            }
+        }
+        
+        // Build and set the overrides
+        if let Ok(overrides) = override_builder.build() {
+            walker_builder.overrides(overrides);
+        }
+        
+        // Collect paths first for batch processing
+        let paths_to_process = Arc::new(Mutex::new(Vec::<(PathBuf, bool)>::new()));
+        
+        // Walk directory using the ignore crate
+        walker_builder.build_parallel().run(|| {
+            let paths_to_process = Arc::clone(&paths_to_process);
+            let root_path = root_path.clone();
+            let dirs_with_files = Arc::clone(&dirs_with_files_clone);
+            let visited_paths = Arc::clone(&visited_paths);
+            
+            Box::new(move |entry_result| {
+                match entry_result {
+                    Ok(entry) => {
+                        let path = entry.path();
+                        
+                        // Skip .gitignore and .titor_ignore files themselves
+                        if let Some(file_name) = path.file_name() {
+                            let file_name_str = file_name.to_string_lossy();
+                            if file_name_str == ".gitignore" || file_name_str == ".titor_ignore" {
+                                return WalkState::Continue;
+                            }
+                        }
+                        
+                        // Get file type from entry
+                        let is_dir = entry.file_type()
+                            .map(|ft| ft.is_dir())
+                            .unwrap_or(false);
+                        
+                        // Track visited paths for deletion detection
+                        if let Ok(relative_path) = utils::make_relative(path, &root_path) {
+                            visited_paths.lock().insert(relative_path);
+                        }
+                        
+                        // Track that parent directories have files
+                        if !is_dir {
+                            let mut parent = path.parent();
+                            while let Some(p) = parent {
+                                if p == root_path {
+                                    break;
+                                }
+                                dirs_with_files.lock().insert(p.to_path_buf());
+                                parent = p.parent();
+                            }
+                        }
+                        
+                        // Collect path for batch processing
+                        paths_to_process.lock().push((path.to_path_buf(), is_dir));
+                    }
+                    Err(e) => {
+                        warn!("Walk error: {}", e);
+                    }
+                }
+                
+                WalkState::Continue
+            })
+        });
+        
+        // Process collected paths in parallel using rayon
+        let paths_vec = paths_to_process.lock().clone();
+        let root_path_for_processing = self.root_path.clone();
+        let skipped_clone = Arc::clone(&skipped_count);
+        
+        let file_entries: Vec<Option<FileEntry>> = paths_vec
+            .par_iter()
+            .map(|(path, is_directory)| -> Result<Option<FileEntry>> {
+                // Try to use index entry if available and not verifying
+                if !verify && parent_index.is_some() {
+                    if let Ok(relative_path) = utils::make_relative(path, &root_path_for_processing) {
+                        if let Ok(Some(index_entry)) = parent_index.unwrap().get(&relative_path) {
+                            // For directories with dir_hash, check if we can skip the subtree
+                            if *is_directory && index_entry.dir_hash.is_some() {
+                                // Get current directory metadata
+                                if let Ok(metadata) = utils::get_file_metadata(path) {
+                                    // Check if directory metadata matches
+                                    if metadata.size == index_entry.size
+                                        && metadata.permissions == index_entry.mode
+                                        && metadata_matches_ns(&metadata, &index_entry)
+                                    {
+                                        // Compute current dir hash
+                                        if let Ok(current_hash) = parent_index.unwrap().compute_dir_hash(&relative_path) {
+                                            if Some(current_hash) == index_entry.dir_hash {
+                                                debug!("Skipping unchanged directory subtree: {}", relative_path.display());
+                                                skipped_clone.fetch_add(1, Ordering::Relaxed);
+                                                
+                                                // Return the cached entry
+                                                return Ok(Some(create_file_entry_from_index(
+                                                    relative_path,
+                                                    &index_entry,
+                                                    metadata,
+                                                )));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // For files, check if we can reuse the hash
+                            if !*is_directory {
+                                if let Ok(metadata) = utils::get_file_metadata(path) {
+                                    // Check if file metadata matches
+                                    if metadata.size == index_entry.size
+                                        && metadata.permissions == index_entry.mode
+                                        && metadata_matches_ns(&metadata, &index_entry)
+                                    {
+                                        trace!("Reusing hash for unchanged file: {}", relative_path.display());
+                                        skipped_clone.fetch_add(1, Ordering::Relaxed);
+                                        
+                                        // Return the cached entry
+                                        return Ok(Some(create_file_entry_from_index(
+                                            relative_path,
+                                            &index_entry,
+                                            metadata,
+                                        )));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Fall back to normal processing
+                process_file_entry(path, &root_path_for_processing, self.max_file_size, *is_directory)
+            })
+            .map(|result| result.unwrap_or_else(|e| {
+                warn!("Error processing entry: {}", e);
+                None
+            }))
+            .collect();
+        
+        // Filter and collect valid entries
+        let mut final_entries = Vec::new();
+        let dirs_with_files = directories_with_files.lock();
+        
+        for entry_opt in file_entries.into_iter() {
+            if let Some(entry) = entry_opt {
+                // Filter out empty directories
+                if !entry.is_directory || !dirs_with_files.contains(&self.root_path.join(&entry.path)) {
+                    // Update counters
+                    processed_count.fetch_add(1, Ordering::Relaxed);
+                    total_size.fetch_add(entry.size, Ordering::Relaxed);
+                    
+                    // Report progress
+                    if let Some(ref callback) = progress_callback {
+                        let info = ProgressInfo {
+                            operation: "Scanning files (optimized)".to_string(),
+                            current_item: Some(entry.path.to_string_lossy().to_string()),
+                            processed: processed_count.load(Ordering::Relaxed),
+                            total: None,
+                            bytes_processed: total_size.load(Ordering::Relaxed),
+                            total_bytes: None,
+                        };
+                        callback(info);
+                    }
+                    
+                    final_entries.push(entry);
+                }
+            }
+        }
+        
+        final_entries.sort_by(|a, b| a.path.cmp(&b.path));
+        
+        let scan_duration = start.elapsed();
+        let skipped = skipped_count.load(Ordering::Relaxed);
+        
+        info!(
+            "Optimized scan complete: {} files/directories ({} bytes) in {:?}, {} entries skipped",
+            final_entries.len(),
+            total_size.load(Ordering::Relaxed),
+            scan_duration,
+            skipped
+        );
+        
+        Ok(final_entries)
+    }
+    
     /// Detect changes between current state and a manifest
     ///
     /// Compares the current state of the directory with a previous manifest
@@ -713,7 +1002,7 @@ impl FileTracker {
 }
 
 /// Process a single file entry
-fn process_file_entry(
+pub fn process_file_entry(
     path: &Path,
     root_path: &Path,
     max_file_size: u64,
@@ -888,6 +1177,79 @@ pub fn create_file_map<'a>(entries: &'a [FileEntry]) -> HashMap<&'a Path, &'a Fi
     entries.iter()
         .map(|e| (e.path.as_path(), e))
         .collect()
+}
+
+/// Check if file metadata matches at nanosecond precision
+///
+/// Compares file metadata timestamps with nanosecond precision to detect
+/// even the smallest changes. This is used by the index-based scanning
+/// to determine if a file needs to be re-processed.
+///
+/// # Arguments
+///
+/// * `metadata` - Current file metadata
+/// * `index_entry` - Stored index entry to compare against
+///
+/// # Returns
+///
+/// Returns true if the metadata matches exactly, false otherwise
+fn metadata_matches_ns(metadata: &crate::utils::FileMetadata, index_entry: &IndexEntry) -> bool {
+    use chrono::{DateTime, Utc};
+    
+    // Convert metadata times to nanoseconds since epoch
+    let mtime_dt: DateTime<Utc> = metadata.modified.into();
+    let mtime_ns = mtime_dt.timestamp_nanos_opt().unwrap_or(0);
+    
+    // For now, we don't track creation time in FileMetadata, so we only compare mtime
+    mtime_ns == index_entry.mtime_ns
+}
+
+/// Create a FileEntry from an IndexEntry
+///
+/// Converts an index entry back into a FileEntry when the file hasn't changed.
+/// This allows reusing cached hash values without re-reading the file.
+///
+/// # Arguments
+///
+/// * `path` - Relative path to the file
+/// * `index_entry` - The cached index entry
+/// * `metadata` - Current file metadata
+///
+/// # Returns
+///
+/// Returns a FileEntry with information from the index
+fn create_file_entry_from_index(
+    path: PathBuf,
+    index_entry: &IndexEntry,
+    metadata: crate::utils::FileMetadata,
+) -> FileEntry {
+    // Hash metadata
+    let mut hash_builder = FileEntryHashBuilder::new();
+    let metadata_hash = hash_builder.hash_metadata(
+        metadata.permissions,
+        &metadata.modified.into(),
+    );
+    
+    // Compute combined hash
+    let combined_hash = hash_builder.combined_hash(&index_entry.hash, &metadata_hash);
+    
+    FileEntry {
+        path: path.clone(),
+        content_hash: index_entry.hash.clone(),
+        size: index_entry.size,
+        permissions: metadata.permissions,
+        modified: metadata.modified.into(),
+        is_compressed: false, // Will be set during storage
+        metadata_hash,
+        combined_hash,
+        is_symlink: metadata.is_symlink,
+        symlink_target: if metadata.is_symlink {
+            utils::read_symlink(&path).ok()
+        } else {
+            None
+        },
+        is_directory: index_entry.is_dir,
+    }
 }
 
 #[cfg(test)]
